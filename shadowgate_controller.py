@@ -217,12 +217,12 @@ class AdvancedShadowGateController:
             ready = select.select([self.socket], [], [], self.command_timeout)
             if not ready[0]:
                 print(colored("⏰ Timeout esperando respuesta", 'yellow'))
-                return None
+                return {'success': False, 'error': 'Timeout esperando respuesta'}
 
             # Recibir tamaño de respuesta
             size_data = self.socket.recv(4)
             if not size_data:
-                return None
+                return {'success': False, 'error': 'No se recibió tamaño de respuesta'}
 
             size = struct.unpack('!I', size_data)[0]
             response_data = b''
@@ -232,7 +232,7 @@ class AdvancedShadowGateController:
             while len(response_data) < size:
                 if time.time() - start_time > self.command_timeout:
                     print(colored("⏰ Timeout recibiendo datos", 'yellow'))
-                    return None
+                    return {'success': False, 'error': 'Timeout recibiendo datos'}
 
                 chunk = self.socket.recv(min(4096, size - len(response_data)))
                 if not chunk:
@@ -246,7 +246,7 @@ class AdvancedShadowGateController:
         except Exception as e:
             print(colored(f"❌ Error enviando comando: {e}", 'red'))
             self.connected = False
-            return None
+            return {'success': False, 'error': f'Error de conexión: {str(e)}'}
 
     def execute_command(self, cmd, wait=True):
         """Ejecutar comando en el objetivo"""
@@ -282,7 +282,7 @@ class AdvancedShadowGateController:
                 with open(local_path, 'wb') as f:
                     f.write(file_data)
                 return {'success': True}
-            return result
+            return result or {'success': False, 'error': 'No response from target'}
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
@@ -303,7 +303,8 @@ class AdvancedShadowGateController:
             if result and result.get('success'):
                 results[name] = result['output']
             else:
-                results[name] = f"Error: {result.get('error', 'Unknown error')}"
+                error_msg = result.get('error', 'Unknown error') if result else 'No response'
+                results[name] = f"Error: {error_msg}"
 
         return results
 
@@ -320,6 +321,9 @@ class AdvancedShadowGateController:
             result = self.execute_command(cmd)
             if result and result.get('success'):
                 results[action] = result['output']
+            else:
+                error_msg = result.get('error', 'Unknown error') if result else 'No response'
+                results[action] = f"Error: {error_msg}"
 
         return results
 
@@ -337,6 +341,9 @@ class AdvancedShadowGateController:
             result = self.execute_command(cmd)
             if result and result.get('success'):
                 results[name] = result['output']
+            else:
+                error_msg = result.get('error', 'Unknown error') if result else 'No response'
+                results[name] = f"Error: {error_msg}"
 
         return results
 
@@ -472,7 +479,8 @@ class AdvancedShadowGateController:
                             print(colored("⚠️  Errores:", 'yellow'))
                             print(result.get('error', ''))
                     else:
-                        print(colored("❌ Error ejecutando comando", 'red'))
+                        error_msg = result.get('error', 'Unknown error') if result else 'No response'
+                        print(colored(f"❌ Error ejecutando comando: {error_msg}", 'red'))
 
             elif choice == "9" and self.connected:
                 script = input("Script PowerShell: ").strip()
@@ -482,7 +490,8 @@ class AdvancedShadowGateController:
                         print(colored("✅ Script ejecutado:", 'green'))
                         print(result.get('output', ''))
                     else:
-                        print(colored("❌ Error ejecutando script", 'red'))
+                        error_msg = result.get('error', 'Unknown error') if result else 'No response'
+                        print(colored(f"❌ Error ejecutando script: {error_msg}", 'red'))
 
             elif choice == "10" and self.connected:
                 local = input("Ruta local del archivo: ").strip()
@@ -492,7 +501,8 @@ class AdvancedShadowGateController:
                     if result and result.get('success'):
                         print(colored("✅ Archivo subido exitosamente", 'green'))
                     else:
-                        print(colored("❌ Error subiendo archivo", 'red'))
+                        error_msg = result.get('error', 'Unknown error') if result else 'No response'
+                        print(colored(f"❌ Error subiendo archivo: {error_msg}", 'red'))
 
             elif choice == "11" and self.connected:
                 remote = input("Ruta remota del archivo: ").strip()
@@ -502,7 +512,8 @@ class AdvancedShadowGateController:
                     if result and result.get('success'):
                         print(colored("✅ Archivo descargado exitosamente", 'green'))
                     else:
-                        print(colored("❌ Error descargando archivo", 'red'))
+                        error_msg = result.get('error', 'Unknown error') if result else 'No response'
+                        print(colored(f"❌ Error descargando archivo: {error_msg}", 'red'))
 
             elif choice == "12":
                 targets = self.scan_network_advanced()
@@ -519,7 +530,8 @@ class AdvancedShadowGateController:
                 if result and result.get('success'):
                     print(colored("✅ Conexión funcionando correctamente", 'green'))
                 else:
-                    print(colored("❌ Problemas de conexión", 'red'))
+                    error_msg = result.get('error', 'Unknown error') if result else 'No response'
+                    print(colored(f"❌ Problemas de conexión: {error_msg}", 'red'))
 
             elif choice == "0":
                 self.disconnect()
@@ -569,7 +581,8 @@ class AdvancedShadowGateController:
                     print(colored(f"✅ {description} funcionando:", 'green'))
                     print(result.get('output', '')[:200] + "...")
                 else:
-                    print(colored(f"❌ Error en {description}", 'red'))
+                    error_msg = result.get('error', 'Unknown error') if result else 'No response'
+                    print(colored(f"❌ Error en {description}: {error_msg}", 'red'))
 
             self.disconnect()
         else:
